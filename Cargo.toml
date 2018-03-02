@@ -4,8 +4,9 @@ categories = ["embedded", "hardware-support", "no-std"]
 description = "A platform agnostic driver to interface the HC-SR04 (ultrasonic distance sensor)"
 documentation = "https://docs.rs/hc-sr04"
 keywords = ["embedded-hal-driver", "ultrasonic distance", "sensor"]
-license = "MIT OR Apache-2.0"
+license = "MIT/Apache-2.0"
 name = "hc-sr04"
+readme = "README.md"
 repository = "https://github.com/nordmoen/hc-sr04"
 version = "0.1.0"
 
@@ -13,3 +14,14 @@ version = "0.1.0"
 embedded-hal = "0.1.2"
 nb = "0.1.1"
 stm32f30x-hal = "0.1.2"
+
+[dev-dependencies]
+cortex-m-rtfm = "0.3.1"
+
+[dev-dependencies.f3]
+features = ["rt"]
+version = "0.5.3"
+
+[dev-dependencies.cortex-m-rt]
+features = ["abort-on-panic"]
+version = "0.3.13"

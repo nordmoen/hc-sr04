@@ -7,19 +7,6 @@
 //! us to accurately measure the pulse width, but at the cost of needing
 //! external support for calling `HcSr04::update`.
 //!
-//! ```rust,ignore
-//! // Create device
-//! let hc_sr04 = HcSr04::new();
-//!
-//! // Setup an interrupt handler method which should be called when the
-//! // `Echo` pin is pulled high or low.
-//! fn interrupt_handler() {
-//!     hc_sr04.update();
-//! }
-//! // ... Some other place in your code
-//! let dist = block!(hc_sr04.distance());
-//! ```
-//!
 //! See the `examples` folder for further information.
 //!
 //! [1]: https://crates.io/crates/embedded-hal
@@ -32,14 +19,28 @@ extern crate embedded_hal as hal;
 extern crate nb;
 extern crate stm32f30x_hal;
 
+/// Publicly re-export `nb::Error::WouldBlock` for easier usage down-stream
+pub use nb::Error::WouldBlock;
 use hal::digital::OutputPin;
 use hal::blocking::delay::DelayUs;
 use stm32f30x_hal::time::MonoTimer;
 use stm32f30x_hal::time::Instant;
 
-/// Wrapper for centimeter return value of sensor
+/// Wrapper for return value of sensor
 #[derive(Debug, Copy, Clone)]
-pub struct Centimeters(pub u32);
+pub struct Distance(u32);
+
+impl Distance {
+    /// Get distance as Centimeters
+    pub fn cm(&self) -> u32 {
+        self.0 / 100
+    }
+
+    /// Get distance as millimeters
+    pub fn mm(&self) -> u32 {
+        self.0
+    }
+}
 
 /// Possible error returned by sensor
 #[derive(Debug, Copy, Clone)]
@@ -57,7 +58,7 @@ enum Mode {
     /// Input pin pulled high
     MeasurePulse(Instant),
     /// Measurement is ready
-    Measurement(Centimeters)
+    Measurement(Distance),
 }
 
 /// HC-SR04 device
@@ -72,7 +73,11 @@ pub struct HcSr04<Pin, Delay> {
     mode: Mode,
 }
 
-impl<Pin, Delay> HcSr04<Pin, Delay> where Pin: OutputPin, Delay: DelayUs<u32> {
+impl<Pin, Delay> HcSr04<Pin, Delay>
+where
+    Pin: OutputPin,
+    Delay: DelayUs<u32>,
+{
     /// Create a new driver.
     ///
     /// # Arguments
@@ -85,7 +90,7 @@ impl<Pin, Delay> HcSr04<Pin, Delay> where Pin: OutputPin, Delay: DelayUs<u32> {
         // Ensure that our starting state is valid, if the pin was already
         // high then all internal methods would have to account for that
         // possibility, by defensively setting it low all internal states
-        // can assume it is guaranteed to be low.
+        // can assume it is low.
         let mut trigger = trigger;
         trigger.set_low();
         HcSr04 {
@@ -96,8 +101,7 @@ impl<Pin, Delay> HcSr04<Pin, Delay> where Pin: OutputPin, Delay: DelayUs<u32> {
         }
     }
 
-    /// Trigger sensor reading and return the resulting distance in
-    /// centimeters.
+    /// Trigger sensor reading and return the resulting `Distance`.
     ///
     /// This function uses [`nb::Error::WouldBlock`][1] to signal that a
     /// measurement is taking place. Once the measurement is taken, currently
@@ -105,22 +109,22 @@ impl<Pin, Delay> HcSr04<Pin, Delay> where Pin: OutputPin, Delay: DelayUs<u32> {
     /// will return the distance.
     ///
     /// [1]: https://docs.rs/nb/0.1.1/nb/enum.Error.html
-    pub fn distance(&mut self) -> nb::Result<Centimeters, Error> {
+    pub fn distance(&mut self) -> nb::Result<Distance, Error> {
         match self.mode {
             // Start a new sensor measurement
             Mode::Idle => {
                 self.trigger();
-                Err(nb::Error::WouldBlock)
-            },
+                Err(WouldBlock)
+            }
             // We have triggered the sensor and are awaiting start of
             // return pulse
-            Mode::Triggered       => Err(nb::Error::WouldBlock),
+            Mode::Triggered => Err(WouldBlock),
             // We have detected start of return pulse, wait for end of pulse
-            Mode::MeasurePulse(_) => Err(nb::Error::WouldBlock),
+            Mode::MeasurePulse(_) => Err(WouldBlock),
             // End of pulse detected and distance is ready
-            Mode::Measurement(cm) => {
+            Mode::Measurement(dist) => {
                 self.mode = Mode::Idle;
-                Ok(cm)
+                Ok(dist)
             }
         }
     }
@@ -137,19 +141,19 @@ impl<Pin, Delay> HcSr04<Pin, Delay> where Pin: OutputPin, Delay: DelayUs<u32> {
     /// state. Otherwise it will return `Result::Err`.
     pub fn update(&mut self) -> Result<(), Error> {
         self.mode = match self.mode {
-            Mode::Triggered => {
-                Mode::MeasurePulse(self.timer.now())
-            },
+            Mode::Triggered => Mode::MeasurePulse(self.timer.now()),
             Mode::MeasurePulse(ref start) => {
                 // How many ticks have passed since we started measurement
                 let ticks = start.elapsed();
                 // What does these ticks mean?
                 let hz = self.timer.frequency().0;
-                // How much time has elapsed in micro seconds
-                let elapsed = ticks / (hz / 1_000_000);
+                // Calculation is `distance = seconds * 343.21 m/s * 0.5`
+                // By doing some pre-calculations we can simply perform
+                // the following to get millimeters:
+                let distance_mm = (ticks * 171_605) / hz;
                 // Update internal mode
-                Mode::Measurement(Centimeters(elapsed / 58))
-            },
+                Mode::Measurement(Distance(distance_mm))
+            }
             _ => return Err(Error::WrongMode),
         };
         Ok(())
