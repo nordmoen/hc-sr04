@@ -16,12 +16,25 @@ nb = "0.1.1"
 stm32f30x-hal = "0.1.2"
 
 [dev-dependencies]
+cortex-m = "0.4.1"
 cortex-m-rtfm = "0.3.1"
+
+[dev-dependencies.cortex-m-rt]
+features = ["abort-on-panic"]
+version = "0.3.13"
 
 [dev-dependencies.f3]
 features = ["rt"]
 version = "0.5.3"
 
-[dev-dependencies.cortex-m-rt]
-features = ["abort-on-panic"]
-version = "0.3.13"
+[dev-dependencies.stm32f30x-hal]
+features = ["rt"]
+version = "0.1.2"
+
+[profile.dev]
+codegen-units = 1
+incremental = false
+
+[profile.release]
+debug = true
+lto = true

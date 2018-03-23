@@ -1,4 +1,4 @@
-//! A platform agnostic driver to interface the HC-SR04 (ultrasonic distance sensor).
+//! A platform agnostic driver to interface the [`HC-SR04`][2] (ultrasonic distance sensor).
 //!
 //! This driver is built using [`embedded-hal`][1] traits.
 //!
@@ -10,17 +10,19 @@
 //! See the `examples` folder for further information.
 //!
 //! [1]: https://crates.io/crates/embedded-hal
+//! [2]: http://www.micropik.com/PDF/HCSR04.pdf
 
 #![deny(missing_docs)]
 #![deny(warnings)]
+#![feature(never_type)]
 #![no_std]
 
 extern crate embedded_hal as hal;
 extern crate nb;
 extern crate stm32f30x_hal;
 
-/// Publicly re-export `nb::Error::WouldBlock` for easier usage down-stream
-pub use nb::Error::WouldBlock;
+/// Publicly re-export `nb::Error` for easier usage down-stream
+pub use nb::Error;
 use hal::digital::OutputPin;
 use hal::blocking::delay::DelayUs;
 use stm32f30x_hal::time::MonoTimer;
@@ -31,21 +33,21 @@ use stm32f30x_hal::time::Instant;
 pub struct Distance(u32);
 
 impl Distance {
-    /// Get distance as Centimeters
+    /// Get distance as centimeters.
     pub fn cm(&self) -> u32 {
-        self.0 / 100
+        self.0 / 10
     }
 
-    /// Get distance as millimeters
+    /// Get distance as millimeters.
     pub fn mm(&self) -> u32 {
         self.0
     }
 }
 
-/// Possible error returned by sensor
+/// Possible error returned by sensor.
 #[derive(Debug, Copy, Clone)]
-pub enum Error {
-    /// Sensor is in wrong mode for update to take place
+pub enum SensorError {
+    /// Sensor is in wrong mode for update to take place.
     WrongMode,
 }
 
@@ -108,19 +110,22 @@ where
     /// user responsibility of calling `update` on interrupt, the function
     /// will return the distance.
     ///
+    /// # Note
+    /// This method will not return another error except [`WouldBlock`][1].
+    ///
     /// [1]: https://docs.rs/nb/0.1.1/nb/enum.Error.html
-    pub fn distance(&mut self) -> nb::Result<Distance, Error> {
+    pub fn distance(&mut self) -> nb::Result<Distance, !> {
         match self.mode {
             // Start a new sensor measurement
             Mode::Idle => {
                 self.trigger();
-                Err(WouldBlock)
+                Err(Error::WouldBlock)
             }
             // We have triggered the sensor and are awaiting start of
             // return pulse
-            Mode::Triggered => Err(WouldBlock),
+            Mode::Triggered => Err(Error::WouldBlock),
             // We have detected start of return pulse, wait for end of pulse
-            Mode::MeasurePulse(_) => Err(WouldBlock),
+            Mode::MeasurePulse(_) => Err(Error::WouldBlock),
             // End of pulse detected and distance is ready
             Mode::Measurement(dist) => {
                 self.mode = Mode::Idle;
@@ -139,7 +144,7 @@ where
     /// # Return
     /// This function will return `Result::Ok` if called in the correct
     /// state. Otherwise it will return `Result::Err`.
-    pub fn update(&mut self) -> Result<(), Error> {
+    pub fn update(&mut self) -> Result<(), SensorError> {
         self.mode = match self.mode {
             Mode::Triggered => Mode::MeasurePulse(self.timer.now()),
             Mode::MeasurePulse(ref start) => {
@@ -154,7 +159,7 @@ where
                 // Update internal mode
                 Mode::Measurement(Distance(distance_mm))
             }
-            _ => return Err(Error::WrongMode),
+            _ => return Err(SensorError::WrongMode),
         };
         Ok(())
     }
