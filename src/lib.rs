@@ -18,15 +18,12 @@
 #![no_std]
 
 extern crate embedded_hal as hal;
-extern crate nb;
-extern crate stm32f30x_hal;
+use hal::blocking::delay::DelayUs;
+use hal::digital::OutputPin;
 
+extern crate nb;
 /// Publicly re-export `nb::Error` for easier usage down-stream
 pub use nb::Error;
-use hal::digital::OutputPin;
-use hal::blocking::delay::DelayUs;
-use stm32f30x_hal::time::MonoTimer;
-use stm32f30x_hal::time::Instant;
 
 /// Wrapper for return value of sensor
 #[derive(Debug, Copy, Clone)]
@@ -57,10 +54,12 @@ enum Mode {
     Idle,
     /// Sensor has been triggered, waiting for return
     Triggered,
-    /// Input pin pulled high
-    MeasurePulse(Instant),
-    /// Measurement is ready
-    Measurement(Distance),
+    /// Measurement is in progress
+    Measurement,
+    /// Measurement is completed
+    Completed,
+    /// Measurement timed out
+    Timedout,
 }
 
 /// HC-SR04 device
@@ -69,10 +68,14 @@ pub struct HcSr04<Pin, Delay> {
     pin: Pin,
     /// Delay to wait on for sensor trigger
     delay: Delay,
-    /// Timer to estimate returning pulse width
-    timer: MonoTimer,
     /// Internal mode of sensor
     mode: Mode,
+    ///  Frequency (Hz) of clock ticks passed to capture method
+    hz: u32,
+    /// Echo rising edge timestamp
+    t1: u32,
+    /// Echo falling edge timestamp
+    t2: u32,
 }
 
 impl<Pin, Delay> HcSr04<Pin, Delay>
@@ -86,9 +89,8 @@ where
     /// - `trigger` is the `OutputPin` connected to the sensor used to trigger
     /// the sensor into taking a measurement.
     /// - `delay` is a timer used to wait for the sensor to trigger.
-    /// - `timer` is a timer used to estimate the pulse width of the sensor
-    /// return.
-    pub fn new(trigger: Pin, delay: Delay, timer: MonoTimer) -> Self {
+    /// - `hz` frequency (Hz) of clock ticks passed to capture method
+    pub fn new(trigger: Pin, delay: Delay, hz: u32) -> Self {
         // Ensure that our starting state is valid, if the pin was already
         // high then all internal methods would have to account for that
         // possibility, by defensively setting it low all internal states
@@ -98,8 +100,10 @@ where
         HcSr04 {
             pin: trigger,
             delay: delay,
-            timer: timer,
             mode: Mode::Idle,
+            hz: hz,
+            t1: 0,
+            t2: 0,
         }
     }
 
@@ -114,28 +118,34 @@ where
     /// This method will not return another error except [`WouldBlock`][1].
     ///
     /// [1]: https://docs.rs/nb/0.1.1/nb/enum.Error.html
-    pub fn distance(&mut self) -> nb::Result<Distance, !> {
+    pub fn distance(&mut self) -> nb::Result<Option<Distance>, !> {
         match self.mode {
             // Start a new sensor measurement
             Mode::Idle => {
                 self.trigger();
                 Err(Error::WouldBlock)
             }
-            // We have triggered the sensor and are awaiting start of
-            // return pulse
+            // Waiting for the rising edge of echo pulse
             Mode::Triggered => Err(Error::WouldBlock),
-            // We have detected start of return pulse, wait for end of pulse
-            Mode::MeasurePulse(_) => Err(Error::WouldBlock),
-            // End of pulse detected and distance is ready
-            Mode::Measurement(dist) => {
-                self.mode = Mode::Idle;
-                Ok(dist)
+            // Waiting for the falling edge of echo pulse
+            Mode::Measurement => Err(Error::WouldBlock),
+            // Measurement timedout
+            Mode::Timedout => {
+                self.reset();
+                Ok(None)
+            }
+            // Measurement completed
+            Mode::Completed => {
+                // Divisions to avoid u32 overflow
+                let d = self.t2.wrapping_sub(self.t1) * (171_605 / 1000) / (self.hz / 1000);
+                self.reset();
+                Ok(Some(Distance(d)))
             }
         }
     }
 
-    /// Update the internal state noting that an external interrupt has
-    /// occurred.
+    /// Update the internal state noting that an external interrupt tracking
+    /// echo response pulse has occurred.
     ///
     /// This function updates the internal state in response to an external
     /// interrupt caused by the sensor. This interface will be removed once
@@ -144,21 +154,35 @@ where
     /// # Return
     /// This function will return `Result::Ok` if called in the correct
     /// state. Otherwise it will return `Result::Err`.
-    pub fn update(&mut self) -> Result<(), SensorError> {
+    pub fn capture(&mut self, ts: u32) -> Result<(), SensorError> {
         self.mode = match self.mode {
-            Mode::Triggered => Mode::MeasurePulse(self.timer.now()),
-            Mode::MeasurePulse(ref start) => {
-                // How many ticks have passed since we started measurement
-                let ticks = start.elapsed();
-                // What does these ticks mean?
-                let hz = self.timer.frequency().0;
-                // Calculation is `distance = seconds * 343.21 m/s * 0.5`
-                // By doing some pre-calculations we can simply perform
-                // the following to get millimeters:
-                let distance_mm = (ticks * 171_605) / hz;
-                // Update internal mode
-                Mode::Measurement(Distance(distance_mm))
+            Mode::Triggered => {
+                self.t1 = ts;
+                Mode::Measurement
             }
+            Mode::Measurement => {
+                self.t2 = ts;
+                Mode::Completed
+            }
+            _ => return Err(SensorError::WrongMode),
+        };
+        Ok(())
+    }
+
+    /// Update the internal state noting that measurement has timed out.
+    ///
+    /// This function updates the internal state in response to an external
+    /// interrupt caused by some guard timer or any other appropriate type
+    /// of watcher.
+    ///
+    /// # Return
+    /// This function will return `Result::Ok` if called in the correct
+    /// state. Otherwise it will return `Result::Err`.
+    pub fn timedout(&mut self) -> Result<(), SensorError> {
+        self.mode = match self.mode {
+            Mode::Triggered => Mode::Timedout,
+            Mode::Measurement => Mode::Timedout,
+            Mode::Completed => Mode::Completed,
             _ => return Err(SensorError::WrongMode),
         };
         Ok(())
@@ -170,5 +194,12 @@ where
         self.delay.delay_us(10);
         self.pin.set_low();
         self.mode = Mode::Triggered;
+    }
+
+    /// Reset internal state
+    fn reset(&mut self) {
+        self.t1 = 0;
+        self.t2 = 0;
+        self.mode = Mode::Idle;
     }
 }

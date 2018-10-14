@@ -3,9 +3,10 @@
 //!
 //! [1]: https://github.com/japaric/f3
 
+#![feature(extern_prelude)]
 #![deny(unsafe_code)]
 #![deny(warnings)]
-#![feature(proc_macro)]
+#![no_main]
 #![no_std]
 
 #[macro_use]
@@ -13,16 +14,18 @@ extern crate cortex_m;
 extern crate cortex_m_rtfm as rtfm;
 extern crate f3;
 extern crate hc_sr04;
+extern crate panic_itm;
 
 use cortex_m::peripheral::ITM;
 use f3::hal::delay::Delay;
-use f3::hal::gpio::gpioa::PA8;
 use f3::hal::gpio;
+use f3::hal::gpio::gpioa::PA8;
 use f3::hal::prelude::*;
 use f3::hal::stm32f30x;
+use f3::hal::time::Instant;
 use f3::hal::time::MonoTimer;
 use f3::led::Leds;
-use hc_sr04::{HcSr04, Error};
+use hc_sr04::{Error, HcSr04};
 use rtfm::{app, Resource, Threshold};
 
 app! {
@@ -37,6 +40,8 @@ app! {
         static LEDS: Leds;
         static EXTI: stm32f30x::EXTI;
         static ITM: ITM;
+        static TIMER: MonoTimer;
+        static TS: Option<Instant> = None;
     },
 
     idle: {
@@ -46,12 +51,12 @@ app! {
     tasks: {
         EXTI15_10: {
             path: update,
-            resources: [SENSOR, EXTI],
+            resources: [SENSOR, EXTI, TIMER, TS],
         }
     },
 }
 
-fn init(p: init::Peripherals) -> init::LateResources {
+fn init(p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     let mut flash = p.device.FLASH.constrain();
     let mut rcc = p.device.RCC.constrain();
     let mut gpioa = p.device.GPIOA.split(&mut rcc.ahb);
@@ -65,7 +70,7 @@ fn init(p: init::Peripherals) -> init::LateResources {
         .pa8
         .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
     // Create sensor!
-    let sensor = HcSr04::new(pin, delay, timer);
+    let sensor = HcSr04::new(pin, delay, timer.frequency().0);
     // Prepare LEDs
     let leds = Leds::new(p.device.GPIOE.split(&mut rcc.ahb));
     // Setup interrupt on Pin PA15
@@ -79,6 +84,7 @@ fn init(p: init::Peripherals) -> init::LateResources {
         LEDS: leds,
         EXTI: p.device.EXTI,
         ITM: p.core.ITM,
+        TIMER: timer,
     }
 }
 
@@ -90,29 +96,35 @@ fn idle(t: &mut Threshold, mut r: idle::Resources) -> ! {
         let dist = r.SENSOR.claim_mut(t, |s, _t| s.distance());
         match dist {
             Ok(dist) => {
-                // Distance in cm:
-                let cm = dist.cm();
-                iprintln!(_stim, "{:?}", cm);
-                // How many LEDs should we turn on:
-                let num_leds = {
-                    if cm <= 2 {
-                        // 2cm is the smallest distance the sensor will
-                        // reliably report so use that as minimum
-                        r.LEDS.len()
-                    } else if cm >= 10 {
-                        0
-                    } else {
-                        r.LEDS.len() - (cm as usize - 2)
+                match dist {
+                    Some(dist) => {
+                        // Distance in cm:
+                        let cm = dist.cm();
+                        iprintln!(_stim, "{:?}", cm);
+                        // How many LEDs should we turn on:
+                        let num_leds = {
+                            if cm <= 2 {
+                                // 2cm is the smallest distance the sensor will
+                                // reliably report so use that as minimum
+                                r.LEDS.len()
+                            } else if cm >= 10 {
+                                0
+                            } else {
+                                r.LEDS.len() - (cm as usize - 2)
+                            }
+                        };
+                        r.LEDS.iter_mut().for_each(|l| l.off());
+                        // Turn on LEDs
+                        r.LEDS.iter_mut()
+                            // Take the appropriate number:
+                            .take(num_leds)
+                            // Turn on:
+                            .for_each(|l| l.on());
                     }
-                };
-                r.LEDS.iter_mut()
-                    .for_each(|l| l.off());
-                // Turn on LEDs
-                r.LEDS.iter_mut()
-                    // Take the appropriate number:
-                    .take(num_leds)
-                    // Turn on:
-                    .for_each(|l| l.on());
+                    None => {
+                        iprintln!(_stim, "Error");
+                    }
+                }
             }
             Err(Error::WouldBlock) => {
                 // Tried to poll the sensor, but nothing is ready yet.
@@ -129,8 +141,23 @@ fn idle(t: &mut Threshold, mut r: idle::Resources) -> ! {
 // Function to notify sensor of external interrupt. If setup correctly
 // the interrupt should occur once the echo pin is pulled high or low.
 fn update(_t: &mut Threshold, mut r: EXTI15_10::Resources) {
-    r.SENSOR
-        .update()
-        .expect("Interrupt function called while sensor were in wrong state!");
+    match *r.TS {
+        Some(ts) => {
+            let delta = ts.elapsed();
+            *r.TS = None;
+
+            r.SENSOR
+                .capture(delta)
+                .expect("echo handler: sensor in wrong state!");
+        }
+        None => {
+            *r.TS = Some(r.TIMER.now());
+
+            r.SENSOR
+                .capture(0)
+                .expect("echo handler: sensor in wrong state!");
+        }
+    }
+
     r.EXTI.pr1.write(|w| w.pr15().set_bit());
 }
