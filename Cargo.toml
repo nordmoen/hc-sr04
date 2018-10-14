@@ -28,6 +28,12 @@ version = "0.6.1"
 features = ["rt"]
 version = "0.2.0"
 
+[target.thumbv7m-none-eabi.dev-dependencies.stm32f103xx]
+features = ["rt"]
+version = "0.10.0"
+
+[target.thumbv7m-none-eabi.dev-dependencies.stm32f103xx-hal]
+git = "https://github.com/japaric/stm32f103xx-hal"
 
 [profile.dev]
 codegen-units = 1
