@@ -14,8 +14,10 @@
 
 #![deny(missing_docs)]
 #![deny(warnings)]
-#![feature(never_type)]
 #![no_std]
+
+extern crate void;
+use void::Void;
 
 extern crate embedded_hal as hal;
 use hal::blocking::delay::DelayUs;
@@ -118,7 +120,7 @@ where
     /// This method will not return another error except [`WouldBlock`][1].
     ///
     /// [1]: https://docs.rs/nb/0.1.1/nb/enum.Error.html
-    pub fn distance(&mut self) -> nb::Result<Option<Distance>, !> {
+    pub fn distance(&mut self) -> nb::Result<Option<Distance>, Void> {
         match self.mode {
             // Start a new sensor measurement
             Mode::Idle => {
